@@ -3,3 +3,4 @@ openpyxl>=3.1,<4
 oracledb>=2.5,<27
 pandas>=2.2,<4
 python-dotenv>=1.0,<2
+gunicorn>=23,<24
