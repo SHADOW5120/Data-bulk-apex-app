@@ -1,0 +1,30 @@
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment variables - never upload secrets
+.env
+.env.*
+
+# Keep example configuration if needed
+!.env.example
+
+# Uploaded files
+uploads/*
+!uploads/.gitkeep
+
+# Test cache
+.pytest_cache/
+.coverage
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log

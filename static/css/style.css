@@ -1,0 +1,62 @@
+
+body {
+    background-color: #f4f6f9;
+    color: #212529;
+    font-family: Arial, sans-serif;
+}
+
+.card {
+    border-radius: 12px;
+}
+
+.upload-area {
+    border: 2px dashed #ced4da;
+    border-radius: 12px;
+    padding: 30px;
+    text-align: center;
+    background: #fafbfc;
+    transition: 0.2s;
+}
+
+.upload-area:hover {
+    border-color: #0d6efd;
+    background: #f0f6ff;
+}
+
+.summary-card {
+    background: #f8f9fa;
+    border-radius: 10px;
+    padding: 18px;
+    height: 100%;
+}
+
+.summary-card small {
+    color: #6c757d;
+}
+
+.summary-card h3 {
+    margin-top: 8px;
+    margin-bottom: 0;
+    font-weight: 700;
+}
+
+.table th {
+    white-space: nowrap;
+}
+
+.table td {
+    vertical-align: middle;
+}
+
+.navbar-brand {
+    letter-spacing: 0.3px;
+}
+
+.btn {
+    border-radius: 7px;
+    font-weight: 600;
+}
+
+footer {
+    font-size: 12px;
+}

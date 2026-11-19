@@ -1,0 +1,342 @@
+
+{% extends "base.html" %}
+
+{% block title %}Column Mapping{% endblock %}
+
+{% block content %}
+
+<div class="card shadow-sm border-0">
+
+    <div class="card-body p-4">
+
+        <h4 class="fw-bold">Oracle Table Mapping</h4>
+
+        <p class="text-secondary">
+            Select an existing table in the APPS schema and map Excel columns.
+        </p>
+
+        {% if error %}
+            <div class="alert alert-danger" role="alert">
+                {{ error }}
+            </div>
+        {% endif %}
+
+        <hr>
+
+        <form method="POST"
+              action="{{ url_for('mapping', import_id=job.import_id) }}">
+
+            <label class="form-label fw-bold">
+                Target Oracle Table
+            </label>
+
+            <label for="oracle-table-search" class="form-label">
+                Search table names
+            </label>
+            <input id="oracle-table-search"
+                   class="form-control mb-2"
+                   type="search"
+                   autocomplete="off"
+                   placeholder="Type part of an APPS table name"
+                   data-search-url="{{ url_for('search_oracle_tables', import_id=job.import_id) }}">
+
+            <div class="row g-2 mb-4">
+
+                <div class="col-md-6">
+
+                    <select id="oracle-table-select"
+                            name="table_name"
+                            class="form-select"
+                            required>
+
+                        <option value="">
+                            Select Oracle Table
+                        </option>
+
+                        {% for table in tables %}
+
+                            <option value="{{ table.table_name }}"
+                                {% if job.table_name == table.table_name %}
+                                    selected
+                                {% endif %}>
+
+                                {{ table.table_name }}
+
+                            </option>
+
+                        {% endfor %}
+
+                        {% if job.table_name and job.table_name not in (tables|map(attribute='table_name')|list) %}
+                            <option value="{{ job.table_name }}" selected>
+                                {{ job.table_name }}
+                            </option>
+                        {% endif %}
+
+                    </select>
+
+                </div>
+
+                <div class="col-auto">
+
+                    <button class="btn btn-primary">
+                        LOAD COLUMNS
+                    </button>
+
+                </div>
+
+            </div>
+
+            <div class="d-flex align-items-center gap-2 mb-4">
+                <button id="oracle-table-previous"
+                        type="button"
+                        class="btn btn-outline-secondary btn-sm"
+                        disabled>Previous</button>
+                <span id="oracle-table-page" class="small text-secondary">Page 1</span>
+                <button id="oracle-table-next"
+                        type="button"
+                        class="btn btn-outline-secondary btn-sm"
+                        {% if not table_has_more %}disabled{% endif %}>Next</button>
+                <span id="oracle-table-search-error"
+                      class="small text-danger"
+                      role="status"></span>
+            </div>
+
+        </form>
+
+
+        {% if metadata %}
+
+            <div class="alert alert-info">
+
+                <strong>Target:</strong>
+                {{ metadata.table_name }}
+
+                <br>
+
+                <strong>Primary Key:</strong>
+                {{ metadata.primary_key or "Not required for direct BLOB inserts" }}
+
+            </div>
+
+
+            <form method="POST"
+                  action="{{ url_for('review', import_id=job.import_id) }}">
+
+                <h5>Column Mapping</h5>
+
+                <p class="text-secondary small">
+                    Select Excel columns and their Oracle destinations.
+                </p>
+
+                <div class="table-responsive">
+
+                    <table class="table table-bordered align-middle">
+
+                        <thead class="table-light">
+
+                            <tr>
+
+                                <th>Excel Column</th>
+
+                                <th>Oracle Column</th>
+
+                                <th>Oracle Type</th>
+
+                            </tr>
+
+                        </thead>
+
+                        <tbody>
+
+                            {% for excel_column in columns %}
+
+                                <tr>
+
+                                    <td>
+
+                                        <strong>
+                                            {{ excel_column }}
+                                        </strong>
+
+                                        <input type="hidden"
+                                               name="excel_column"
+                                               value="{{ excel_column }}">
+                                        <input type="hidden" name="column_type" value="DATA">
+
+                                    </td>
+
+                                    <td>
+
+                                        <select name="oracle_column"
+                                            class="form-select oracle-column-select">
+
+                                            <option value="">
+                                                -- Skip Column --
+                                            </option>
+
+                                            {% for col in metadata.columns if col.data_type != "BLOB" %}
+
+                                                <option value="{{ col.column_name }}"
+                                                    data-type="{{ col.data_type }}">
+                                                    {{ col.column_name }} ({{ col.data_type }})
+
+                                                </option>
+
+                                            {% endfor %}
+
+                                        </select>
+
+                                    </td>
+
+                                    <td>
+
+                                        <span class="text-secondary small oracle-type-label">
+                                            Select target column
+                                        </span>
+
+                                    </td>
+
+                                </tr>
+
+                            {% endfor %}
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+                <h5 class="mt-4">ZIP Folder BLOB Mapping</h5>
+                <p class="text-secondary small">
+                    Choose one ZIP folder for each BLOB column. Files in that folder
+                    and its subfolders are naturally sorted and assigned to Excel rows.
+                </p>
+
+                {% set blob_columns = metadata.columns | selectattr("data_type", "equalto", "BLOB") | list %}
+                {% if blob_columns %}
+                    <div class="table-responsive mb-4">
+                        <table class="table table-bordered align-middle">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>Oracle BLOB Column</th>
+                                    <th>File Type</th>
+                                    <th>ZIP Folder</th>
+                                    <th>Original Filename Column (optional)</th>
+                                    <th>Extension Column (optional)</th>
+                                    <th>Size NUMBER Column (optional)</th>
+                                    <th>MIME Type Column (optional)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for col in blob_columns %}
+                                    <tr>
+                                        <td>
+                                            {{ col.column_name }}
+                                            <input type="hidden"
+                                                   name="blob_column"
+                                                   value="{{ col.column_name }}">
+                                        </td>
+                                        <td>
+                                            <select name="blob_type" class="form-select">
+                                                <option value="FILE">FILE</option>
+                                                <option value="IMAGE">IMAGE</option>
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select name="blob_folder" class="form-select">
+                                                <option value="">-- Do not map --</option>
+                                                {% for folder in zip_folders %}
+                                                    <option value="{{ folder }}">{{ folder }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select name="blob_filename_column" class="form-select">
+                                                <option value="">Do not map</option>
+                                                {% for candidate in metadata.columns if candidate.data_type == "VARCHAR2" %}
+                                                    <option value="{{ candidate.column_name }}">{{ candidate.column_name }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select name="blob_extension_column" class="form-select">
+                                                <option value="">Do not map</option>
+                                                {% for candidate in metadata.columns if candidate.data_type == "VARCHAR2" %}
+                                                    <option value="{{ candidate.column_name }}">{{ candidate.column_name }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select name="blob_size_column" class="form-select">
+                                                <option value="">Do not map</option>
+                                                {% for candidate in metadata.columns if candidate.data_type == "NUMBER" %}
+                                                    <option value="{{ candidate.column_name }}">{{ candidate.column_name }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </td>
+                                        <td>
+                                            <select name="blob_mime_column" class="form-select">
+                                                <option value="">Do not map</option>
+                                                {% for candidate in metadata.columns if candidate.data_type == "VARCHAR2" %}
+                                                    <option value="{{ candidate.column_name }}">{{ candidate.column_name }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </td>
+                                    </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% else %}
+                    <p class="text-secondary">This table has no BLOB columns.</p>
+                {% endif %}
+
+
+                <div class="alert alert-warning">
+
+                    <strong>Mapping rules:</strong>
+
+                    <ul class="mb-0 mt-2">
+
+                        <li>DATA is for normal Oracle columns.</li>
+
+                        <li>Each mapped BLOB column uses one ZIP folder; files map to rows in natural filename order.</li>
+
+                        <li>A ZIP is required only when mapping a BLOB column.</li>
+
+                        <li>Filename, extension, byte size, and MIME type columns are optional and must match their Oracle data types.</li>
+
+                        <li>Do not map multiple Excel columns to one Oracle column.</li>
+
+                    </ul>
+
+                </div>
+
+
+                <div class="d-flex justify-content-between">
+
+                    <a href="{{ url_for('preview', import_id=job.import_id) }}"
+                       class="btn btn-secondary">
+
+                        Back
+
+                    </a>
+
+                    <button type="submit"
+                            class="btn btn-primary">
+
+                        REVIEW MAPPING
+
+                    </button>
+
+                </div>
+
+            </form>
+
+        {% endif %}
+
+    </div>
+
+</div>
+
+{% endblock %}

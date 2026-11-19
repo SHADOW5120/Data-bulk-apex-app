@@ -1,0 +1,126 @@
+
+{% extends "base.html" %}
+
+{% block title %}Upload - Data Bulk Apex{% endblock %}
+
+{% block content %}
+
+<div class="row justify-content-center">
+
+    <div class="col-xl-8">
+
+        <div class="card shadow-sm border-0">
+
+            <div class="card-body p-4 p-md-5">
+
+                <h3 class="fw-bold">
+                    Oracle Data Importer
+                </h3>
+
+                <p class="text-secondary">
+                    Upload Excel data and bulk attachments
+                    directly to the APPS schema in Oracle Database.
+                </p>
+
+                <hr>
+
+                <form action="{{ url_for('start_upload') }}"
+                      method="POST"
+                      enctype="multipart/form-data">
+
+                                2. Attachments (Optional)
+
+                        <label class="form-label fw-bold">
+                            1. Excel File
+                        </label>
+
+                        <div class="upload-area">
+
+                            <h5>Excel Data</h5>
+
+                            <p class="text-secondary small">
+                                Select an .xlsx file
+                            </p>
+
+                            <input type="file"
+                                   name="excel_file"
+                                   class="form-control"
+                                   accept=".xlsx"
+                                   required>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="mb-4">
+
+                        <label class="form-label fw-bold">
+                            2. Attachment ZIP
+                        </label>
+
+                        <div class="upload-area">
+
+                            <h5>Bulk Attachments</h5>
+                                <li>Excel-only imports do not need a ZIP file.</li>
+                                <li>Attachment paths must match ZIP paths.</li>
+                            <p class="text-secondary small">
+                                Images, PDF, DOCX and other supported files
+                            </p>
+
+                            <input type="file"
+                                   name="zip_file"
+                                   class="form-control"
+                                   accept=".zip">
+                                   
+                            <small class="text-secondary">
+                                Optional. Only upload ZIP when you need to
+                                import images or attachments into BLOB columns.
+                            </small>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="alert alert-info">
+
+                        <strong>Note:</strong>
+
+                        <ul class="mb-0 mt-2">
+
+                            <li>Excel must contain column headers.</li>
+
+                            <li>File paths must match ZIP paths.</li>
+
+                            <li>Maximum 5,000 files per ZIP.</li>
+
+                            <li>Maximum individual file size: 50 MB.</li>
+
+                        </ul>
+
+                    </div>
+
+
+                    <div class="d-grid">
+
+                        <button type="submit"
+                                class="btn btn-primary btn-lg">
+
+                            REVIEW
+
+                        </button>
+
+                    </div>
+
+                </form>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</div>
+
+{% endblock %}
