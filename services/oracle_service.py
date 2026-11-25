@@ -10,6 +10,7 @@ class OracleService:
     """Direct Oracle Database access limited to the configured application schema."""
 
     _IDENTIFIER = re.compile(r"^[A-Z][A-Z0-9_$#]{0,127}$")
+    _PROCEDURE_METADATA_TIMEOUT_MS = 30_000
 
     def __init__(self, config):
         self.config = config
@@ -129,6 +130,218 @@ class OracleService:
                 "page": page,
                 "page_size": page_size,
                 "has_more": len(rows) > page_size,
+            }
+        finally:
+            connection.close()
+
+    def search_procedures(self, query="", page=1, page_size=50):
+        """Return one bounded page of APPS standalone and packaged procedures."""
+        try:
+            page = int(page)
+            page_size = int(page_size)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Invalid procedure search pagination.") from error
+        if page < 1 or page_size < 1 or page_size > 50:
+            raise ValueError(
+                "Procedure search page must be 1 or greater and page size at most 50."
+            )
+
+        query = str(query or "").strip().upper()
+        if len(query) > 256:
+            raise ValueError("Procedure search text is too long.")
+
+        connection = self.connect()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT p.object_name,
+                           NVL(p.procedure_name, p.object_name),
+                           p.procedure_name,
+                           p.subprogram_id,
+                           p.overload
+                    FROM all_procedures p
+                    WHERE p.owner = :owner
+                      AND (
+                        (p.procedure_name IS NULL AND EXISTS (
+                            SELECT 1 FROM all_objects o
+                            WHERE o.owner = p.owner
+                              AND o.object_name = p.object_name
+                              AND o.object_type = 'PROCEDURE'
+                        ))
+                        OR
+                        (p.procedure_name IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM all_objects o
+                            WHERE o.owner = p.owner
+                              AND o.object_name = p.object_name
+                              AND o.object_type = 'PACKAGE'
+                        ))
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM all_arguments a
+                        WHERE a.owner = p.owner
+                        AND a.object_name =
+                            NVL(p.procedure_name, p.object_name)
+                        AND a.subprogram_id = p.subprogram_id
+                        AND (
+                          (p.procedure_name IS NULL AND a.package_name IS NULL)
+                          OR a.package_name = p.object_name
+                        )
+                        AND a.position = 0
+                      )
+                      AND (
+                        :query IS NULL
+                        OR INSTR(
+                            UPPER(p.object_name || '.' ||
+                                  NVL(p.procedure_name, p.object_name)),
+                            :query
+                        ) > 0
+                      )
+                    ORDER BY p.object_name,
+                             NVL(p.procedure_name, p.object_name),
+                             p.subprogram_id
+                    OFFSET :offset ROWS FETCH NEXT :fetch_count ROWS ONLY
+                    """,
+                    owner=self.config.DB_SCHEMA,
+                    query=query or None,
+                    offset=(page - 1) * page_size,
+                    fetch_count=page_size + 1,
+                )
+                rows = cursor.fetchall()
+
+            procedures = []
+            for package_name, procedure_name, package_procedure, subprogram_id, overload in rows[:page_size]:
+                procedures.append({
+                    "package_name": package_procedure and package_name or None,
+                    "procedure_name": procedure_name,
+                    "subprogram_id": subprogram_id,
+                    "overload": overload,
+                    "label": (
+                        f"{package_name}.{procedure_name}"
+                        if package_procedure
+                        else procedure_name
+                    ) + (f" (overload {overload})" if overload else ""),
+                })
+            return {
+                "procedures": procedures,
+                "page": page,
+                "page_size": page_size,
+                "has_more": len(rows) > page_size,
+            }
+        finally:
+            connection.close()
+
+    def get_procedure_metadata(
+        self,
+        package_name,
+        procedure_name,
+        subprogram_id,
+    ):
+        package_name = (
+            self._identifier(package_name, "package name")
+            if package_name
+            else None
+        )
+        procedure_name = self._identifier(
+            procedure_name,
+            "procedure name",
+        )
+        try:
+            subprogram_id = int(subprogram_id)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Invalid procedure identifier.") from error
+        if subprogram_id < 1:
+            raise ValueError("Invalid procedure identifier.")
+
+        connection = self.connect()
+        try:
+            if (
+                oracledb.is_thin_mode()
+                or oracledb.clientversion()[0] >= 18
+            ):
+                connection.call_timeout = self._PROCEDURE_METADATA_TIMEOUT_MS
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT p.overload
+                    FROM all_procedures p
+                    WHERE p.owner = :owner
+                      AND p.object_name = :object_name
+                      AND p.subprogram_id = :subprogram_id
+                      AND (
+                        (:package_name IS NULL AND p.procedure_name IS NULL)
+                        OR p.procedure_name = :procedure_name
+                      )
+                    """,
+                    owner=self.config.DB_SCHEMA,
+                    object_name=package_name or procedure_name,
+                    subprogram_id=subprogram_id,
+                    package_name=package_name,
+                    procedure_name=procedure_name,
+                )
+                routine = cursor.fetchone()
+                if routine is None:
+                    raise ValueError(
+                        "The selected Oracle procedure was not found or is not accessible."
+                    )
+
+                cursor.execute(
+                    """
+                    SELECT position, argument_name, data_type, in_out,
+                           data_length, data_precision, data_scale, defaulted,
+                           data_level, type_owner, type_name
+                    FROM all_arguments
+                    WHERE owner = :owner
+                      AND object_name = :procedure_name
+                      AND subprogram_id = :subprogram_id
+                      AND (
+                        (:package_name IS NULL AND package_name IS NULL)
+                        OR package_name = :package_name
+                      )
+                    ORDER BY sequence
+                    """,
+                    owner=self.config.DB_SCHEMA,
+                    procedure_name=procedure_name,
+                    subprogram_id=subprogram_id,
+                    package_name=package_name,
+                )
+                rows = cursor.fetchall()
+
+            if any(row[0] == 0 for row in rows):
+                raise ValueError(
+                    "Stored functions are not supported; select a procedure."
+                )
+
+            parameters = []
+            for row in rows:
+                (
+                    position, name, data_type, mode, data_length,
+                    precision, scale, defaulted, data_level, type_owner,
+                    type_name,
+                ) = row
+                parameters.append({
+                    "position": position,
+                    "name": name,
+                    "data_type": data_type,
+                    "mode": mode,
+                    "data_length": data_length,
+                    "data_precision": precision,
+                    "data_scale": scale,
+                    "defaulted": defaulted == "Y",
+                    "nullable": None,
+                    "data_level": data_level,
+                    "type_owner": type_owner,
+                    "type_name": type_name,
+                })
+
+            return {
+                "schema": self.config.DB_SCHEMA,
+                "package_name": package_name,
+                "procedure_name": procedure_name,
+                "subprogram_id": subprogram_id,
+                "overload": routine[0],
+                "parameters": parameters,
             }
         finally:
             connection.close()
@@ -288,10 +501,18 @@ class OracleService:
         data_type = data_type.upper()
         if data_type == "BLOB":
             return oracledb.DB_TYPE_BLOB
-        if data_type in {"NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE"}:
+        if data_type == "BINARY_FLOAT":
+            return oracledb.DB_TYPE_BINARY_FLOAT
+        if data_type == "BINARY_DOUBLE":
+            return oracledb.DB_TYPE_BINARY_DOUBLE
+        if data_type in {"NUMBER", "FLOAT"}:
             return oracledb.DB_TYPE_NUMBER
         if data_type == "DATE":
             return oracledb.DB_TYPE_DATE
+        if "WITH LOCAL TIME ZONE" in data_type:
+            return oracledb.DB_TYPE_TIMESTAMP_LTZ
+        if "WITH TIME ZONE" in data_type:
+            return oracledb.DB_TYPE_TIMESTAMP_TZ
         if data_type.startswith("TIMESTAMP"):
             return oracledb.DB_TYPE_TIMESTAMP
         if data_type == "CLOB":
@@ -300,9 +521,92 @@ class OracleService:
             return oracledb.DB_TYPE_NCLOB
         if data_type in {"NCHAR", "NVARCHAR2"}:
             return oracledb.DB_TYPE_NVARCHAR
-        if data_type in {"CHAR", "VARCHAR2"}:
+        if data_type in {"CHAR", "VARCHAR", "VARCHAR2"}:
             return oracledb.DB_TYPE_VARCHAR
+        if data_type in {
+            "INTEGER", "PLS_INTEGER", "BINARY_INTEGER", "SMALLINT",
+        }:
+            return oracledb.DB_TYPE_NUMBER
         return None
+
+    def execute_procedure_rows(self, procedure, rows):
+        """Execute each mapped row in its own commit/rollback boundary."""
+        package_name = procedure.get("package_name")
+        package_name = (
+            self._identifier(package_name, "package name")
+            if package_name
+            else None
+        )
+        procedure_name = self._identifier(
+            procedure.get("procedure_name"),
+            "procedure name",
+        )
+        procedure_path = ".".join(
+            part for part in (
+                self.config.DB_SCHEMA,
+                package_name,
+                procedure_name,
+            )
+            if part
+        )
+        parameters = procedure.get("parameters", [])
+        errors = []
+        connection = self.connect()
+        try:
+            with connection.cursor() as cursor:
+                for row_number, values in rows:
+                    try:
+                        named_parameters = {}
+                        for parameter in parameters:
+                            mode = parameter["mode"]
+                            name = parameter["name"].upper()
+                            value = values.get(name)
+                            if (
+                                mode != "OUT"
+                                and parameter.get("defaulted", False)
+                                and value is None
+                            ):
+                                continue
+
+                            data_type = parameter["data_type"].upper()
+                            if data_type in {
+                                "INTEGER", "PLS_INTEGER", "BINARY_INTEGER",
+                                "SMALLINT",
+                            }:
+                                data_type = "NUMBER"
+                            bind_type = self._bind_type(data_type)
+                            if bind_type is None or parameter.get("data_level", 0):
+                                raise ValueError(
+                                    f"Unsupported Oracle parameter type for "
+                                    f"{parameter['name']}: {parameter['data_type']}"
+                                )
+
+                            size = (
+                                max(parameter.get("data_length") or 0, 1)
+                                if data_type in {
+                                    "CHAR", "VARCHAR2", "NCHAR", "NVARCHAR2",
+                                }
+                                else None
+                            )
+                            variable = cursor.var(bind_type, size=size) if size else cursor.var(bind_type)
+                            if mode != "OUT":
+                                variable.setvalue(0, value)
+                            named_parameters[parameter["name"]] = variable
+
+                        cursor.callproc(
+                            procedure_path,
+                            keyword_parameters=named_parameters,
+                        )
+                        connection.commit()
+                    except Exception as error:
+                        connection.rollback()
+                        errors.append({
+                            "row": row_number,
+                            "error": str(error),
+                        })
+        finally:
+            connection.close()
+        return errors
 
     def merge_blob_records(
         self,

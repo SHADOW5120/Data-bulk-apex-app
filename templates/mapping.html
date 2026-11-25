@@ -9,10 +9,10 @@
 
     <div class="card-body p-4">
 
-        <h4 class="fw-bold">Oracle Table Mapping</h4>
+        <h4 class="fw-bold">Oracle Import Mapping</h4>
 
         <p class="text-secondary">
-            Select an existing table in the APPS schema and map Excel columns.
+            Choose a direct table import or an existing PL/SQL procedure in the APPS schema.
         </p>
 
         {% if error %}
@@ -23,9 +23,24 @@
 
         <hr>
 
-        <form method="POST"
+        <form id="target-selection-form" method="POST"
               action="{{ url_for('mapping', import_id=job.import_id) }}">
 
+            <label for="import-mode" class="form-label fw-bold">
+                Import Mode
+            </label>
+            <select id="import-mode" name="import_mode" class="form-select mb-3">
+                <option value="DIRECT"
+                    {% if job.get("import_mode", "DIRECT") == "DIRECT" %}selected{% endif %}>
+                    Direct Table
+                </option>
+                <option value="PROCEDURE"
+                    {% if job.get("import_mode") == "PROCEDURE" %}selected{% endif %}>
+                    PL/SQL Procedure
+                </option>
+            </select>
+
+            <div class="mapping-target-direct">
             <label class="form-label fw-bold">
                 Target Oracle Table
             </label>
@@ -101,10 +116,77 @@
                       role="status"></span>
             </div>
 
+            </div>
+
+            <div class="mapping-target-procedure">
+                <label for="oracle-procedure-search" class="form-label fw-bold">
+                    Existing Oracle Procedure
+                </label>
+                <input id="oracle-procedure-search"
+                       class="form-control mb-2"
+                       type="search"
+                       autocomplete="off"
+                       placeholder="Search package or procedure names"
+                       data-search-url="{{ url_for('search_oracle_procedures', import_id=job.import_id) }}">
+                <div class="row g-2 mb-3">
+                    <div class="col-md-6">
+                        <select id="oracle-procedure-select"
+                                name="procedure_key"
+                                class="form-select">
+                            <option value="">Select Oracle Procedure</option>
+                            {% for procedure in procedures %}
+                                <option value="{{ procedure.package_name or '' }}|{{ procedure.procedure_name }}|{{ procedure.subprogram_id }}"
+                                    {% if job.get("procedure")
+                                        and job.procedure.package_name == procedure.package_name
+                                        and job.procedure.procedure_name == procedure.procedure_name
+                                        and job.procedure.subprogram_id == procedure.subprogram_id %}selected{% endif %}>
+                                    {{ procedure.label }}
+                                </option>
+                            {% endfor %}
+                            {% if job.get("procedure") %}
+                                {% set proc = job.procedure %}
+                                {% set state = namespace(found=false) %}
+                                {% for procedure in procedures %}
+                                    {% if proc.package_name == procedure.package_name
+                                        and proc.procedure_name == procedure.procedure_name
+                                        and proc.subprogram_id == procedure.subprogram_id %}
+                                        {% set state.found = true %}
+                                    {% endif %}
+                                {% endfor %}
+                                {% if not state.found %}
+                                    {% set proc_key = (proc.package_name or '') ~ '|' ~ proc.procedure_name ~ '|' ~ proc.subprogram_id %}
+                                    <option value="{{ proc_key }}" selected>
+                                        {% if proc.package_name %}{{ proc.package_name }}.{% endif %}{{ proc.procedure_name }}
+                                    </option>
+                                {% endif %}
+                            {% endif %}
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <button id="load-procedure-button"
+                                type="submit"
+                                class="btn btn-primary">LOAD PARAMETERS</button>
+                    </div>
+                </div>
+                <div id="procedure-load-error"
+                     class="small text-danger mb-2"
+                     role="alert"></div>
+                <div class="d-flex align-items-center gap-2 mb-4">
+                    <button id="oracle-procedure-previous" type="button"
+                            class="btn btn-outline-secondary btn-sm" disabled>Previous</button>
+                    <span id="oracle-procedure-page" class="small text-secondary">Page 1</span>
+                    <button id="oracle-procedure-next" type="button"
+                            class="btn btn-outline-secondary btn-sm"
+                            {% if not procedure_has_more %}disabled{% endif %}>Next</button>
+                    <span id="oracle-procedure-search-error"
+                          class="small text-danger" role="status"></span>
+                </div>
+            </div>
+
         </form>
 
 
-        {% if metadata %}
+        {% if metadata and job.get("import_mode", "DIRECT") == "DIRECT" %}
 
             <div class="alert alert-info">
 
@@ -333,6 +415,154 @@
 
             </form>
 
+        {% endif %}
+
+        {% if job.get("import_mode") == "PROCEDURE" and job.get("procedure_metadata") %}
+            {% set procedure = job.procedure_metadata %}
+            {% set blob_parameters = procedure.parameters
+                | selectattr("data_type", "equalto", "BLOB")
+                | rejectattr("mode", "equalto", "OUT")
+                | list %}
+            <div class="alert alert-info">
+                <strong>Selected procedure:</strong>
+                {% if procedure.package_name %}{{ procedure.package_name }}.{% endif %}{{ procedure.procedure_name }}
+                {% if procedure.overload %}(overload {{ procedure.overload }}){% endif %}
+                <div class="small mt-1">
+                    Parameters are read from Oracle metadata. Only IN and IN/OUT
+                    parameters need input mappings; OUT parameters are bound by the application.
+                </div>
+            </div>
+
+            <form method="POST"
+                  action="{{ url_for('review', import_id=job.import_id) }}">
+                <h5>Procedure Parameter Mapping</h5>
+                <p class="text-secondary small">
+                    Map inputs where needed. For parameters without a PL/SQL
+                    default, empty Excel cells are sent as NULL. Empty or
+                    unmapped parameters with a default are omitted so Oracle
+                    applies that default. Oracle metadata does not reliably
+                    expose procedure parameter nullability.
+                </p>
+                <div class="table-responsive">
+                    <table class="table table-bordered align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Parameter</th>
+                                <th>Oracle Type</th>
+                                <th>Mode / Default</th>
+                                <th>Mapping Requirement</th>
+                                <th>Source</th>
+                                <th>Value / Attachment</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for parameter in procedure.parameters %}
+                                <tr>
+                                    <td><strong>{{ parameter.name }}</strong></td>
+                                    <td>{{ parameter.data_type }}</td>
+                                    <td>
+                                        {{ parameter.mode }}
+                                        {% if parameter.defaulted %}
+                                            <span class="badge bg-info text-dark">Has default</span>
+                                        {% elif parameter.mode != "OUT" %}
+                                            <span class="badge bg-secondary">No default</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if parameter.mode == "OUT" %}
+                                            Not applicable
+                                        {% else %}
+                                            <select name="parameter_requirement"
+                                                    class="form-select">
+                                                <option value="OPTIONAL">Optional source</option>
+                                                <option value="REQUIRED">Require a source mapping</option>
+                                            </select>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if parameter.mode == "OUT" %}
+                                            Output only
+                                        {% else %}
+                                            <input type="hidden" name="procedure_parameter"
+                                                   value="{{ parameter.name }}">
+                                            <select name="parameter_source"
+                                                    class="form-select procedure-source">
+                                                <option value="">-- Select source --</option>
+                                                {% if parameter.data_type != "BLOB" %}
+                                                    <option value="EXCEL">Excel column</option>
+                                                    <option value="CONSTANT">Constant</option>
+                                                {% else %}
+                                                    <option value="ZIP_BLOB">ZIP attachment (BLOB)</option>
+                                                {% endif %}
+                                                {% if parameter.data_type in ["CHAR", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR2", "CLOB", "NCLOB"] and blob_parameters %}
+                                                    <option value="FILE_NAME">Attachment filename</option>
+                                                    <option value="FILE_EXTENSION">Attachment extension</option>
+                                                    <option value="FILE_MIME_TYPE">Attachment MIME type</option>
+                                                {% endif %}
+                                                {% if parameter.data_type in ["NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "INTEGER", "PLS_INTEGER", "BINARY_INTEGER", "SMALLINT"] and blob_parameters %}
+                                                    <option value="FILE_SIZE">Attachment size</option>
+                                                {% endif %}
+                                            </select>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if parameter.mode != "OUT" %}
+                                            <div class="procedure-source-field" data-source="EXCEL">
+                                                <select name="parameter_excel_column" class="form-select">
+                                                    <option value="">Select Excel column</option>
+                                                    {% for column in columns %}
+                                                        <option value="{{ column }}">{{ column }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </div>
+                                            <div class="procedure-source-field" data-source="CONSTANT">
+                                                <input name="parameter_constant" class="form-control"
+                                                       type="text" placeholder="Constant value">
+                                            </div>
+                                            <div class="procedure-source-field" data-source="ZIP_BLOB">
+                                                <select name="parameter_zip_folder" class="form-select mb-2">
+                                                    <option value="">Select ZIP folder</option>
+                                                    {% for folder in zip_folders %}
+                                                        <option value="{{ folder }}">{{ folder }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                                <select name="parameter_file_type" class="form-select">
+                                                    <option value="FILE">FILE</option>
+                                                    <option value="IMAGE">IMAGE</option>
+                                                </select>
+                                            </div>
+                                            <div class="procedure-source-field" data-source="FILE_METADATA">
+                                                <select name="parameter_blob_parameter" class="form-select">
+                                                    <option value="">Select source BLOB parameter</option>
+                                                    {% for blob_parameter in blob_parameters %}
+                                                        <option value="{{ blob_parameter.name }}">{{ blob_parameter.name }}</option>
+                                                    {% endfor %}
+                                                </select>
+                                            </div>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="alert alert-warning">
+                    <ul class="mb-0">
+                        <li>Nullability is not reliably available in Oracle procedure argument metadata. Blank values are passed through as NULL when no default applies; procedure or constraint errors are reported per row.</li>
+                        <li>“Require a source mapping” checks that a source is configured; it does not reject blank cells in that source.</li>
+                        <li>Each BLOB input is sent directly to the procedure as bytes through an Oracle BLOB bind.</li>
+                        <li>Flask does not create an APEX session or populate <code>APEX_APPLICATION_TEMP_FILES</code>. Procedures that depend on that view require a database-side wrapper that accepts the BLOB.</li>
+                        <li>Each successful row is committed independently; a failed row is rolled back. Procedures that commit internally or use autonomous transactions cannot be rolled back by this application.</li>
+                    </ul>
+                </div>
+
+                <div class="d-flex justify-content-between">
+                    <a href="{{ url_for('preview', import_id=job.import_id) }}"
+                       class="btn btn-secondary">Back</a>
+                    <button type="submit" class="btn btn-primary">REVIEW PROCEDURE MAPPING</button>
+                </div>
+            </form>
         {% endif %}
 
     </div>

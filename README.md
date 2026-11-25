@@ -15,7 +15,7 @@ Users can upload Excel files, map columns, assign ZIP folders to BLOB columns, v
 3. [Application Workflow](#3-application-workflow)
 4. [Excel File Preparation](#4-excel-file-preparation)
 5. [ZIP File Preparation](#5-zip-file-preparation)
-6. [Oracle Table Selection](#6-oracle-table-selection)
+6. [Oracle Table, Package-Procedure Selection](#6-oracle-table-package-procedure-selection)
 7. [Column Mapping](#7-column-mapping)
 8. [ZIP Folder Mapping](#8-zip-folder-mapping)
 9. [Data Validation and Review](#9-data-validation-and-review)
@@ -31,16 +31,17 @@ Users can upload Excel files, map columns, assign ZIP folders to BLOB columns, v
 
 - **Excel Upload:** Import structured data from `.xlsx` files.
 - **ZIP Upload:** Upload images and file attachments in a ZIP archive.
-- **Oracle Table Search:** Search available tables instead of manually scrolling through long table lists.
+- **Oracle Table, Package-Procedure Search:** Search available tables, packages-procedures instead of manually scrolling through long table, package-procedure lists.
 - **Dynamic Column Mapping:** Map Excel columns to existing Oracle columns.
 - **ZIP Folder Mapping:** Assign different ZIP folders to different Oracle BLOB columns.
 - **Automatic File Matching:** Match attachments to Excel rows based on filename ordering.
 - **File Metadata Extraction:** Automatically extract original filename, extension, file size, and MIME type.
 - **Data Validation:** Validate required fields, data types, and attachment information before importing.
 - **Import Review:** Review mapped data and matched attachments before execution.
-- **Bulk INSERT:** Insert new records into Oracle tables.
+- **Bulk INSERT:** Insert new records into Oracle tables, packages-procedures.
 - **Bulk UPDATE:** Update existing records and add or replace BLOB attachments according to the selected options.
 - **Batch Processing:** Process records in batches to manage memory consumption.
+- **PL/SQL Procedure Import:** Map Excel values, constants, ZIP BLOBs, and extracted attachment metadata to existing Oracle package or standalone procedure parameters.
 
 ---
 
@@ -74,7 +75,7 @@ Upload Excel and ZIP
 Preview Excel Data
         |
         v
-Select Oracle Database Table
+Select Oracle Database Table, Package-Procedure
         |
         v
 Map Excel Columns
@@ -178,18 +179,33 @@ Each folder can be assigned to a different Oracle BLOB column.
 ## 6. Oracle Table Selection
 
 ![alt text](image-8.png)
-[Oracle Table Search]
+![alt text](image-10.png)
+[Oracle Table, Package-Procedure Search]
 
 After previewing the Excel file:
 
-1. Select the target Oracle table.
-2. Use the search box to find a table by name.
+1. Select the target Oracle table, package-procedure.
+2. Use the search box to find a table, package-procedure by name.
 3. Select the desired table.
 4. Allow the application to retrieve its column metadata.
 
-The application works with existing tables in the connected Oracle schema.
+The application works with existing tables, packages-procedures in the connected Oracle schema.
 
-It does not automatically create or modify database tables.
+It does not automatically create or modify database tables, packages-procedures.
+
+## 6.1 Import Through an Existing PL/SQL Procedure
+
+On the mapping page, choose **PL/SQL Procedure**, search the APPS schema for an existing standalone procedure or packaged procedure, and load its Oracle argument metadata. Each IN or IN/OUT parameter can optionally require a configured source mapping. This checks only that a source is selected; an empty Excel cell is not rejected by mapping validation. For an input without a PL/SQL default, an empty Excel cell is passed as `NULL`. If Oracle reports a default, an empty or unmapped input is omitted from the named procedure call so the default applies. OUT parameters are bound by the application and are not mapped.
+
+Oracle procedure argument metadata does not reliably establish parameter nullability. For inputs without a default, blank values are passed as `NULL`; procedure validation and database constraints remain authoritative, and their errors are reported per row.
+
+Scalar values are validated against the parameter data types reported by Oracle. BLOB IN parameters can be mapped to ZIP folders. Filename, extension, byte size, and MIME type extracted from the assigned ZIP files can also be mapped to compatible scalar parameters. Procedures can perform their own inserts or updates across multiple tables, packages-procedures; procedure mode does not require the parameters to correspond to columns in one target table, package-procedure.
+
+The application binds values with `python-oracledb` and calls the selected procedure; it does not generate DML for procedure mode or create/modify database objects. Unsupported composite, collection, and other unrecognized parameter types are rejected during review.
+
+Flask does not create an APEX session and cannot assume access to `APEX_APPLICATION_TEMP_FILES`. ZIP attachments are passed directly as BLOB input parameters. A procedure that queries the APEX temporary-files view needs a database-side wrapper designed to accept the BLOB and provide the procedure's expected attachment context.
+
+Procedure calls use a per-row transaction boundary: successful rows are committed, and failed rows are rolled back and reported while later rows continue. This cannot undo commits performed inside a procedure or changes made by autonomous transactions; use procedures that do not commit internally when per-row rollback is required.
 
 ---
 
@@ -204,7 +220,7 @@ Map Excel columns to the corresponding Oracle columns.
 ### Optional File Metadata
 
 The application can also store attachment information in separate Oracle columns.
-Map these fields only when the corresponding columns exist in the target Oracle table.
+Map these fields only when the corresponding columns exist in the target Oracle table, package-procedure.
 
 ---
 
@@ -242,7 +258,7 @@ Validation includes:
 ### Attachment Review
 
 ![alt text](image-9.png)
-[Attachment Review Table]
+[Attachment Review Table, Package-Procedure]
 
 The Review page displays attachment information such as:
 
@@ -314,7 +330,7 @@ For important imports, verify the resulting data and BLOB attachments in Oracle 
 | Problem | Possible Solution |
 |---|---|
 | Cannot connect to Oracle | Check host, port, service name, username, password, and network access. |
-| No tables displayed | Check schema configuration and database privileges. |
+| No tables, packages-procedures displayed | Check schema configuration and database privileges. |
 | Invalid date value | Check Excel date formatting and date conversion. |
 | Missing ZIP attachments | Check folder assignments and filename ordering. |
 | Invalid extension or MIME type | Check file format and validation rules. |

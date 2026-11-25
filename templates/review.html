@@ -46,9 +46,21 @@
 
                 <div class="summary-card">
 
-                    <small>Target Table</small>
+                    <small>
+                        {% if job.get("import_mode") == "PROCEDURE" %}
+                            Target Procedure
+                        {% else %}
+                            Target Table
+                        {% endif %}
+                    </small>
 
-                    <h5>{{ job.table_name }}</h5>
+                    <h5>
+                        {% if job.get("import_mode") == "PROCEDURE" %}
+                            {% if job.procedure.package_name %}{{ job.procedure.package_name }}.{% endif %}{{ job.procedure.procedure_name }}
+                        {% else %}
+                            {{ job.table_name }}
+                        {% endif %}
+                    </h5>
 
                 </div>
 
@@ -81,7 +93,13 @@
         </div>
 
 
-        <h5>Column Mapping Summary</h5>
+        <h5>
+            {% if job.get("import_mode") == "PROCEDURE" %}
+                Parameter Mapping Summary
+            {% else %}
+                Column Mapping Summary
+            {% endif %}
+        </h5>
 
         <div class="table-responsive mb-4">
 
@@ -91,9 +109,21 @@
 
                     <tr>
 
-                        <th>Excel Column</th>
+                        <th>
+                            {% if job.get("import_mode") == "PROCEDURE" %}
+                                Source
+                            {% else %}
+                                Excel Column
+                            {% endif %}
+                        </th>
 
-                        <th>Oracle Column</th>
+                        <th>
+                            {% if job.get("import_mode") == "PROCEDURE" %}
+                                Procedure Parameter
+                            {% else %}
+                                Oracle Column
+                            {% endif %}
+                        </th>
 
                         <th>Type</th>
 
@@ -108,7 +138,18 @@
                         <tr>
 
                             <td>
-                                {% if item.zip_folder %}
+                                {% if job.get("import_mode") == "PROCEDURE" %}
+                                    {% if item.source == "EXCEL" %}
+                                        Excel: {{ item.excel_column }}
+                                    {% elif item.source == "CONSTANT" %}
+                                        Constant: {{ item.constant }}
+                                    {% elif item.source == "ZIP_BLOB" %}
+                                        ZIP folder: {{ item.zip_folder }}
+                                    {% else %}
+                                        {{ item.source.replace("_", " ") }}
+                                        from {{ item.blob_parameter }}
+                                    {% endif %}
+                                {% elif item.zip_folder %}
                                     ZIP folder: {{ item.zip_folder }}
                                     {% if item.metadata_columns %}
                                         <div class="small text-secondary mt-1">
@@ -122,11 +163,21 @@
                                 {% endif %}
                             </td>
 
-                            <td>{{ item.oracle_column }}</td>
+                            <td>
+                                {% if job.get("import_mode") == "PROCEDURE" %}
+                                    {{ item.parameter }}
+                                {% else %}
+                                    {{ item.oracle_column }}
+                                {% endif %}
+                            </td>
 
                             <td>
 
-                                {% if item.column_type == "IMAGE" %}
+                                {% if job.get("import_mode") == "PROCEDURE" %}
+                                    <span class="badge bg-secondary">
+                                        {{ item.data_type }} / {{ item.source }}
+                                    </span>
+                                {% elif item.column_type == "IMAGE" %}
 
                                     <span class="badge bg-info">
                                         IMAGE / BLOB

@@ -41,6 +41,11 @@ from services.validation_service import (
 )
 
 from services.import_service import import_records
+from services.procedure_import_service import import_procedure_records
+from services.procedure_service import (
+    validate_procedure_mappings,
+    validate_procedure_records,
+)
 
 from utils.helpers import (
     generate_id,
@@ -318,6 +323,12 @@ def start_upload():
 
             "metadata": None,
 
+            "import_mode": "DIRECT",
+
+            "procedure": None,
+
+            "procedure_metadata": None,
+
             "mappings": [],
 
             "status": "UPLOADED",
@@ -414,6 +425,9 @@ def mapping(import_id):
     job = get_job(import_id)
 
     excel_path, zip_path = get_job_files(job)
+    is_ajax_request = (
+        request.headers.get("X-Requested-With") == "XMLHttpRequest"
+    )
 
     # --------------------------------------------------------
     # Load selected Oracle table
@@ -421,32 +435,42 @@ def mapping(import_id):
 
     if request.method == "POST":
 
-        table_name = request.form.get(
-            "table_name",
-            ""
-        ).strip()
-
-        if not table_name:
-
-            flash("Please select an Oracle table.")
-
-            return redirect(
-                url_for(
-                    "mapping",
-                    import_id=import_id
-                )
-            )
-
         try:
+            import_mode = request.form.get("import_mode", "DIRECT").upper()
+            if import_mode == "DIRECT":
+                table_name = request.form.get("table_name", "").strip()
+                if not table_name:
+                    raise ValueError("Please select an Oracle table.")
+                metadata = oracle.get_table_metadata(table_name)
+                job["table_name"] = table_name
+                job["metadata"] = metadata
+                job["procedure"] = None
+                job["procedure_metadata"] = None
+            elif import_mode == "PROCEDURE":
+                procedure_key = request.form.get("procedure_key", "")
+                parts = procedure_key.split("|")
+                if len(parts) != 3:
+                    raise ValueError("Please select an Oracle procedure.")
+                package_name, procedure_name, subprogram_id = parts
+                metadata = oracle.get_procedure_metadata(
+                    package_name or None,
+                    procedure_name,
+                    subprogram_id,
+                )
+                job["import_mode"] = "PROCEDURE"
+                job["table_name"] = None
+                job["metadata"] = None
+                job["procedure"] = {
+                    "package_name": metadata["package_name"],
+                    "procedure_name": metadata["procedure_name"],
+                    "subprogram_id": metadata["subprogram_id"],
+                    "overload": metadata["overload"],
+                }
+                job["procedure_metadata"] = metadata
+            else:
+                raise ValueError("Invalid import mode.")
 
-            metadata = oracle.get_table_metadata(
-                table_name
-            )
-
-            job["table_name"] = table_name
-
-            job["metadata"] = metadata
-
+            job["import_mode"] = import_mode
             job["mappings"] = []
 
             job["status"] = "MAPPING"
@@ -456,12 +480,31 @@ def mapping(import_id):
                 job
             )
 
+            if import_mode == "PROCEDURE":
+                if is_ajax_request:
+                    return jsonify({
+                        "success": True,
+                        "redirect_url": url_for(
+                            "mapping",
+                            import_id=import_id,
+                        ),
+                    })
+                return redirect(
+                    url_for("mapping", import_id=import_id)
+                )
+
         except Exception as error:
             app.logger.exception(
-                "Oracle metadata loading failed for mapping import %s and table %s",
+                "Oracle metadata loading failed for mapping import %s",
                 import_id,
-                table_name,
             )
+
+            if is_ajax_request:
+                status_code = 400 if isinstance(error, ValueError) else 503
+                return jsonify({
+                    "success": False,
+                    "error": str(error),
+                }), status_code
 
             flash(str(error))
 
@@ -473,8 +516,35 @@ def mapping(import_id):
             )
 
     try:
-        table_page = oracle.search_tables(page=1, page_size=50)
-        tables = table_page["tables"]
+        if (
+            job.get("import_mode") == "PROCEDURE"
+            and job.get("procedure")
+            and job.get("procedure_metadata")
+        ):
+            table_page = {"tables": [], "has_more": False}
+            tables = []
+            procedure = job["procedure"]
+            procedure_label = (
+                f"{procedure['package_name']}."
+                if procedure.get("package_name")
+                else ""
+            ) + procedure["procedure_name"]
+            if procedure.get("overload"):
+                procedure_label += f" (overload {procedure['overload']})"
+            procedure_page = {
+                "procedures": [{
+                    **procedure,
+                    "label": procedure_label,
+                }],
+                "has_more": False,
+            }
+        else:
+            table_page = oracle.search_tables(page=1, page_size=50)
+            tables = table_page["tables"]
+            procedure_page = {
+                "procedures": [],
+                "has_more": False,
+            }
     except Exception as error:
         app.logger.exception(
             "Oracle table discovery failed for mapping import %s",
@@ -488,6 +558,8 @@ def mapping(import_id):
             columns=[],
             zip_folders=[],
             table_has_more=False,
+            procedures=[],
+            procedure_has_more=False,
             error=str(error),
         ), 503
 
@@ -507,6 +579,8 @@ def mapping(import_id):
         job=job,
         tables=tables,
         metadata=job.get("metadata"),
+        procedures=procedure_page["procedures"],
+        procedure_has_more=procedure_page["has_more"],
         columns=data["columns"],
         table_has_more=table_page["has_more"],
         zip_folders=get_zip_folders(
@@ -535,6 +609,181 @@ def search_oracle_tables(import_id):
         return jsonify({"error": str(error)}), 503
 
 
+@app.route("/mapping/<import_id>/procedures")
+def search_oracle_procedures(import_id):
+    get_job(import_id)
+    try:
+        result = oracle.search_procedures(
+            query=request.args.get("q", ""),
+            page=request.args.get("page", 1, type=int),
+            page_size=50,
+        )
+        return jsonify(result)
+    except Exception as error:
+        app.logger.exception(
+            "Oracle procedure search failed for mapping import %s",
+            import_id,
+        )
+        return jsonify({"error": str(error)}), 503
+
+
+def _refresh_procedure_metadata(job):
+    procedure = job.get("procedure")
+    if not procedure:
+        raise ValueError("Select an Oracle procedure first.")
+    metadata = oracle.get_procedure_metadata(
+        procedure.get("package_name"),
+        procedure.get("procedure_name"),
+        procedure.get("subprogram_id"),
+    )
+    saved = job.get("procedure_metadata") or {}
+    if metadata.get("parameters") != saved.get("parameters"):
+        raise ValueError(
+            "The selected procedure signature changed. Reload the procedure "
+            "and review its parameter mappings again."
+        )
+    return metadata
+
+
+def _procedure_blob_mappings(mappings):
+    return [
+        {
+            "oracle_column": mapping["parameter"],
+            "column_type": mapping["file_type"],
+            "zip_folder": mapping["zip_folder"],
+        }
+        for mapping in mappings
+        if mapping["source"] == "ZIP_BLOB"
+    ]
+
+
+def _procedure_mapping_errors(job, message):
+    return render_template(
+        "review.html",
+        job=job,
+        mappings=job.get("mappings", []),
+        total_rows=0,
+        errors=[{
+            "row": "-",
+            "operation": "PROCEDURE",
+            "column": "Oracle",
+            "error": message,
+        }],
+        valid=False,
+        zip_review={"folders": [], "errors": []},
+        selected_actions={},
+        procedure_metadata=job.get("procedure_metadata"),
+    )
+
+
+def _review_procedure_import(import_id, job, excel_path, zip_path):
+    try:
+        metadata = _refresh_procedure_metadata(job)
+        parameter_names = request.form.getlist("procedure_parameter")
+        sources = request.form.getlist("parameter_source")
+        requirements = request.form.getlist("parameter_requirement")
+        excel_columns = request.form.getlist("parameter_excel_column")
+        constants = request.form.getlist("parameter_constant")
+        zip_folders = request.form.getlist("parameter_zip_folder")
+        file_types = request.form.getlist("parameter_file_type")
+        blob_parameters = request.form.getlist("parameter_blob_parameter")
+        if not (
+            len(parameter_names)
+            == len(sources)
+            == len(requirements)
+            == len(excel_columns)
+            == len(constants)
+            == len(zip_folders)
+            == len(file_types)
+            == len(blob_parameters)
+        ):
+            raise ValueError("Invalid procedure parameter mapping form.")
+        if any(
+            requirement not in {"OPTIONAL", "REQUIRED"}
+            for requirement in requirements
+        ):
+            raise ValueError("Invalid procedure parameter requirement.")
+
+        selected_mappings = [
+            {
+                "parameter": name,
+                "source": source,
+                "mapping_required": requirement == "REQUIRED",
+                "excel_column": excel_column,
+                "constant": constant,
+                "zip_folder": zip_folder,
+                "file_type": file_type,
+                "blob_parameter": blob_parameter,
+            }
+            for name, source, requirement, excel_column, constant, zip_folder,
+            file_type, blob_parameter in zip(
+                parameter_names,
+                sources,
+                requirements,
+                excel_columns,
+                constants,
+                zip_folders,
+                file_types,
+                blob_parameters,
+            )
+        ]
+        excel_data = read_excel_data(
+            excel_path,
+            job["selected_sheet"],
+        )
+        mappings = validate_procedure_mappings(
+            metadata["parameters"],
+            selected_mappings,
+            excel_data["columns"],
+        )
+        records = read_excel_records(excel_path, job["selected_sheet"])
+        zip_info = get_zip_information(zip_path)
+        blob_mappings = _procedure_blob_mappings(mappings)
+        zip_review = review_zip_folders(
+            zip_info["files"],
+            blob_mappings,
+            len(records),
+            zip_info["folders"],
+        )
+        if blob_mappings and not zip_path:
+            zip_review["errors"].append({
+                "row": "-",
+                "column": "ZIP",
+                "error": "A ZIP file is required for mapped BLOB parameters.",
+            })
+
+        errors = validate_procedure_records(
+            records,
+            metadata["parameters"],
+            mappings,
+        )
+        errors.extend(zip_review["errors"])
+        for error in errors:
+            error.setdefault("operation", "PROCEDURE")
+
+        job["procedure_metadata"] = metadata
+        job["mappings"] = mappings
+        job["status"] = "REVIEWED" if not errors else "INVALID"
+        save_job(import_id, job)
+        return render_template(
+            "review.html",
+            job=job,
+            mappings=mappings,
+            total_rows=len(records),
+            errors=errors,
+            valid=not errors,
+            zip_review=zip_review,
+            selected_actions={},
+            procedure_metadata=metadata,
+        )
+    except Exception as error:
+        app.logger.exception(
+            "Procedure mapping validation failed for import %s",
+            import_id,
+        )
+        return _procedure_mapping_errors(job, str(error)), 400
+
+
 # ============================================================
 # 7. REVIEW MAPPING AND VALIDATE DATA
 # ============================================================
@@ -548,6 +797,14 @@ def review(import_id):
     job = get_job(import_id)
 
     excel_path, zip_path = get_job_files(job)
+
+    if job.get("import_mode") == "PROCEDURE":
+        return _review_procedure_import(
+            import_id,
+            job,
+            excel_path,
+            zip_path,
+        )
 
     metadata = job.get("metadata")
 
@@ -850,6 +1107,96 @@ def review(import_id):
         )
 
 
+def _upload_procedure_import(import_id, job):
+    records = []
+    try:
+        excel_path, zip_path = get_job_files(job)
+        records = read_excel_records(
+            excel_path,
+            job["selected_sheet"],
+        )
+        metadata = _refresh_procedure_metadata(job)
+        excel_columns = list(records[0].keys()) if records else (
+            read_excel_data(excel_path, job["selected_sheet"])["columns"]
+        )
+        mappings = validate_procedure_mappings(
+            metadata["parameters"],
+            job.get("mappings", []),
+            excel_columns,
+        )
+        errors = validate_procedure_records(
+            records,
+            metadata["parameters"],
+            mappings,
+        )
+
+        zip_info = get_zip_information(zip_path)
+        blob_mappings = _procedure_blob_mappings(mappings)
+        zip_review = review_zip_folders(
+            zip_info["files"],
+            blob_mappings,
+            len(records),
+            zip_info["folders"],
+        )
+        if blob_mappings and not zip_path:
+            zip_review["errors"].append({
+                "row": "-",
+                "column": "ZIP",
+                "error": "A ZIP file is required for mapped BLOB parameters.",
+            })
+        errors.extend(zip_review["errors"])
+        for error in errors:
+            error.setdefault("operation", "PROCEDURE")
+
+        if errors:
+            job["status"] = "INVALID"
+            save_job(import_id, job)
+            return render_template(
+                "review.html",
+                job=job,
+                mappings=mappings,
+                total_rows=len(records),
+                errors=errors,
+                valid=False,
+                zip_review=zip_review,
+                selected_actions={},
+                procedure_metadata=metadata,
+            )
+
+        job["status"] = "IMPORTING"
+        save_job(import_id, job)
+        result = import_procedure_records(
+            records=records,
+            zip_path=zip_path,
+            mappings=mappings,
+            procedure=metadata,
+            oracle_service=oracle,
+            assignment_map=zip_review["assignment_map"],
+            assignment_metadata=zip_review["assignment_metadata"],
+        )
+        job["status"] = result["status"]
+        job["result"] = result
+        save_job(import_id, job)
+        return redirect(url_for("result", import_id=import_id))
+    except Exception as error:
+        app.logger.exception(
+            "Oracle procedure import failed for import %s",
+            import_id,
+        )
+        job["status"] = "FAILED"
+        job["result"] = {
+            "status": "FAILED",
+            "total_rows": len(records),
+            "success_rows": 0,
+            "failed_rows": len(records),
+            "success_files": 0,
+            "failed_files": 0,
+            "errors": [{"error": str(error)}],
+        }
+        save_job(import_id, job)
+        return redirect(url_for("result", import_id=import_id))
+
+
 # ============================================================
 # 8. UPLOAD DATA TO ORACLE
 # ============================================================
@@ -872,6 +1219,9 @@ def upload_to_oracle(import_id):
             400,
             "Please complete a valid REVIEW first."
         )
+
+    if job.get("import_mode") == "PROCEDURE":
+        return _upload_procedure_import(import_id, job)
 
     excel_path, zip_path = get_job_files(job)
 
